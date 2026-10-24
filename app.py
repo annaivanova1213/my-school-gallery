@@ -185,7 +185,7 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
     cols = st.columns(4)
     for i, it in enumerate(group):
         with cols[i % 4]:
-            # Исправлено: используем фиксированную ширину, чтобы избежать ошибки TypeError
+            # Фиксированная ширина для стабильности
             st.image(thumb_url(it["file_id"]), width=300)
             
             st.markdown(
@@ -196,6 +196,7 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
             st.caption(it["contest"])
             if it["teacher"]:
                 st.caption(f"👩‍🏫 {it['teacher']}")
+                
             color = LEVEL_COLORS.get(it["level"], "#374151")
             st.markdown(
                 f"<span style='background:{color}22;color:{color};"
@@ -203,5 +204,5 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
                 f"border-radius:20px;'>{it['level']}</span>",
                 unsafe_allow_html=True,
             )
-            st.markdown(f"[📂 Открыть грамоту]({it['url']})")
+            # Строка со ссылкой "Открыть грамоту" удалена
             st.markdown("---")
