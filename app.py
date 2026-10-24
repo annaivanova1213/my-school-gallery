@@ -1,168 +1,204 @@
 # -*- coding: utf-8 -*-
-"""Streamlit: таблица достижений + превью грамот."""
+"""Streamlit: визуальная галерея грамот (онлайн, автообновление)."""
 import re
-import pandas as pd
 import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 from config import CREDS_FILE, SHEET_ID, LIST_ACHIEVEMENTS
 
-st.set_page_config(page_title="MeritHub", page_icon="🎓", layout="wide")
+st.set_page_config(page_title="Галерея грамот", page_icon="🎓", layout="wide")
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
           "https://www.googleapis.com/auth/drive"]
 
 
-# ─── ГЛАВНОЕ ИЗМЕНЕНИЕ: читаем ключи из Secrets (облако) или файла (локально) ───
+# ─── Подключение: Secrets (облако) или файл (локально) ───
 @st.cache_resource(show_spinner=False)
 def get_sheet():
     creds = None
-
-    # 1. Пытаемся взять данные из секретов Streamlit (для облака)
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     except (KeyError, FileNotFoundError):
-        # 2. Если секретов нет — берём локальный файл (для запуска на компьютере)
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEET_ID).worksheet(LIST_ACHIEVEMENTS)
 
 
 def extract_drive_url(cell_value) -> str:
-    """Достаёт URL из ячейки: HYPERLINK, чистая ссылка или ID."""
     if not cell_value:
         return ""
     s = str(cell_value).strip()
-
     m = re.search(r'HYPERLINK\(\s*"([^"]+)"', s, re.IGNORECASE)
     if m:
         return m.group(1)
-
     m = re.search(r'https?://\S+', s)
     if m:
         return m.group(0).rstrip('");, ')
-
     m = re.search(r'\b([A-Za-z0-9_\-]{25,})\b', s)
     if m:
         return f"https://drive.google.com/file/d/{m.group(1)}/view"
-
     return ""
 
 
-st.markdown("<h1 style='margin-bottom:0'>🎓 MeritHub</h1>",
+def get_file_id(url: str) -> str:
+    m = re.search(r'/(?:file/d/|d/|id=)([a-zA-Z0-9_-]+)', url)
+    return m.group(1) if m else ""
+
+
+def thumb_url(file_id: str, size: int = 600) -> str:
+    """Превью через официальный thumbnail Google Drive."""
+    return f"https://drive.google.com/thumbnail?id={file_id}&sz=w{size}"
+
+
+def normalize_klass(raw: str) -> str:
+    if not raw:
+        return "Без класса"
+    s = str(raw).strip().upper().replace("Ё", "Е")
+    m_num = re.search(r'(\d{1,2})', s)
+    if not m_num:
+        return "Без класса"
+    num = m_num.group(1)
+    m_let = re.search(r'[А-ЯA-Z]', s)
+    return f"{num}-{m_let.group(0)}" if m_let else num
+
+
+def klass_sort_key(klass: str):
+    m = re.match(r"^(\d{1,2})(?:-([А-ЯA-Z]))?$", klass)
+    if m:
+        return (0, int(m.group(1)), m.group(2) or "")
+    return (1, 999, klass)
+
+
+# ─── Загрузка данных ───
+st.markdown("<h1 style='margin-bottom:0'>🎓 Галерея грамот</h1>",
             unsafe_allow_html=True)
-st.markdown("### 📋 Сводная таблица достижений")
+st.caption("Онлайн-галерея достижений учащихся. Обновляется автоматически из Google Sheets.")
 
 try:
     ws = get_sheet()
     rows = ws.get_all_records()
 except Exception as e:
     st.error(f"Не удалось подключиться к Google Sheets: {e}")
-    st.info(
-        "Проверьте: 1) Secrets настроены в Streamlit Cloud; "
-        "2) таблица расшарена на client_email из creds.json; "
-        "3) ID таблицы в config.py верный."
-    )
+    st.info("Проверьте Secrets в Streamlit Cloud и доступ к таблице для client_email.")
     st.stop()
 
-df = pd.DataFrame(rows)
-if df.empty:
-    st.warning("Пока нет записей.")
+# ─── Собираем карточки только с фото ───
+items = []
+for r in rows:
+    r = {k.strip() if isinstance(k, str) else k: v for k, v in r.items()}
+    fio = (r.get("ФИО учащегося") or r.get("ФИО учащся")
+           or r.get("fio") or "").strip()
+    if not fio or fio in ("Не распознан", "Не указан"):
+        continue
+
+    url = ""
+    for key in ("Diploma URL", "diploma_url", "Ссылка", "URL"):
+        v = r.get(key)
+        if v:
+            url = str(v).strip()
+            break
+    if not url:
+        url = extract_drive_url(r.get("Диплом") or r.get("diploma") or "")
+    if not url:
+        continue
+
+    fid = get_file_id(url)
+    if not fid:
+        continue
+
+    klass = normalize_klass(r.get("Номинация") or r.get("Класс") or r.get("klass"))
+    contest = (r.get("Название деятельности") or r.get("Название")
+               or r.get("Деятельность") or "Конкурс").strip()
+    level = (r.get("Уровень") or "—").strip()
+    teacher = (r.get("ФИО учителя") or r.get("Учитель") or "").strip()
+
+    items.append({
+        "fio": fio, "klass": klass, "contest": contest,
+        "level": level, "teacher": teacher,
+        "file_id": fid, "url": url,
+    })
+
+if not items:
+    st.warning("Пока нет записей с грамотами.")
     st.stop()
 
-# Чистим имена колонок от лишних пробелов
-df.columns = [c.strip() for c in df.columns]
-
-# ─── Диагностика ───
-with st.expander("🔧 Диагностика данных", expanded=False):
-    st.write("**Колонки:**", list(df.columns))
-    if "Диплом" in df.columns:
-        st.write("**Пример «Диплом»:**", repr(df["Диплом"].iloc[0]))
-    if "Diploma URL" in df.columns:
-        st.write("**Пример «Diploma URL»:**", repr(df["Diploma URL"].iloc[0]))
+st.success(f"Всего грамот: {len(items)}")
 
 # ─── Фильтры ───
-col1, col2, col3 = st.columns(3)
-with col1:
-    klass_col = "Номинация" if "Номинация" in df.columns else df.columns[0]
-    classes = ["Все"] + sorted({str(v) for v in df[klass_col] if v})
-    klass_filter = st.selectbox("Класс / Номинация", classes)
-with col2:
-    lvl_col = "Уровень" if "Уровень" in df.columns else df.columns[0]
-    levels = ["Все"] + sorted({str(v) for v in df[lvl_col] if v})
-    level_filter = st.selectbox("Уровень", levels)
-with col3:
-    search = st.text_input("🔍 Поиск по ФИО", "")
+c1, c2, c3 = st.columns([2, 1, 1])
+with c1:
+    search = st.text_input("🔍 Поиск по ФИО, конкурсу, учителю", "")
+with c2:
+    all_levels = ["Все"] + sorted({it["level"] for it in items
+                                   if it["level"] and it["level"] != "—"})
+    lvl_filter = st.selectbox("Уровень", all_levels)
+with c3:
+    all_klasses = ["Все"] + sorted({it["klass"] for it in items}, key=klass_sort_key)
+    kls_filter = st.selectbox("Класс", all_klasses)
 
-view = df.copy()
-if klass_filter != "Все":
-    view = view[view[klass_col].astype(str) == klass_filter]
-if level_filter != "Все":
-    view = view[view[lvl_col].astype(str) == level_filter]
-if search and "ФИО учащся" in view.columns:
-    view = view[view["ФИО учащся"].astype(str)
-                .str.contains(search, case=False, na=False)]
+filtered = items
+if search:
+    q = search.lower()
+    filtered = [it for it in filtered
+                if q in it["fio"].lower()
+                or q in it["contest"].lower()
+                or q in it["teacher"].lower()]
+if lvl_filter != "Все":
+    filtered = [it for it in filtered if it["level"] == lvl_filter]
+if kls_filter != "Все":
+    filtered = [it for it in filtered if it["klass"] == kls_filter]
 
-st.success(f"Данные загружены из облака. Записей: {len(view)} (из {len(df)})")
+st.caption(f"Показано: {len(filtered)} из {len(items)}")
 
-# ─── Таблица + превью ───
-left, right = st.columns([3, 1])
+if not filtered:
+    st.info("По вашему запросу ничего не найдено.")
+    st.stop()
 
-view = view.reset_index(drop=True)
-view.index = view.index + 1
+# ─── Группировка по классам ───
+by_klass = {}
+for it in filtered:
+    by_klass.setdefault(it["klass"], []).append(it)
 
-# Ищем URL: сначала «Diploma URL», потом «Диплом»
-url_col = None
-if "Diploma URL" in view.columns:
-    url_col = "Diploma URL"
-elif "Диплом" in view.columns:
-    view["_url"] = view["Диплом"].apply(extract_drive_url)
-    url_col = "_url"
+LEVEL_COLORS = {
+    "Районный": "#8A6D00",
+    "Областной": "#1D4ED8",
+    "Республиканский": "#047857",
+    "Международный": "#BE185D",
+}
 
-with left:
-    display_view = view.drop(columns=[url_col], errors="ignore") if url_col else view
-    event = st.dataframe(
-        display_view,
-        use_container_width=True,
-        hide_index=False,
-        on_select="rerun",
-        selection_mode="single-row",
+# ─── Рендер сетки карточек ───
+for klass in sorted(by_klass.keys(), key=klass_sort_key):
+    group = sorted(by_klass[klass], key=lambda x: (x["fio"].lower(),
+                                                   x["contest"].lower()))
+    st.markdown(
+        f"<h2 style='color:#1F4E78;margin:24px 0 12px;'>"
+        f"{klass} <span style='background:#DBEAFE;color:#1D4ED8;"
+        f"font-size:14px;padding:3px 10px;border-radius:20px;'>"
+        f"{len(group)}</span></h2>",
+        unsafe_allow_html=True,
     )
 
-with right:
-    st.markdown("#### 📂 Просмотр грамоты")
-    has_selection = (
-        isinstance(event, dict)
-        and "selection" in event
-        and event["selection"].get("rows")
-    )
-    if has_selection:
-        sel_row = event["selection"]["rows"][0] + 1
-        url = view.loc[sel_row, url_col] if url_col in view.columns else ""
-        if url:
-            embed_url = url.replace("/view", "/preview") \
-                           .replace("?usp=sharing", "") \
-                           .replace("?usp=drivesdk", "")
-            try:
-                st.image(embed_url, use_container_width=True)
-            except Exception:
-                st.warning("Не удалось отобразить превью.")
-            st.markdown(f"[📂 Открыть в Drive]({url})")
-            fio = view.loc[sel_row].get("ФИО учащся", "")
-            contest = view.loc[sel_row].get("Название деятельности", "")
-            if fio:
-                st.caption(f"**{fio}**")
-            if contest:
-                st.caption(contest)
-        else:
-            st.info("У выбранной записи нет ссылки на грамоту.")
-    else:
-        st.info("👈 Выберите строку в таблице, чтобы увидеть грамоту.")
-
-st.download_button("📥 Скачать CSV",
-                   data=view.drop(columns=["_url"], errors="ignore")
-                           .to_csv(index=False).encode("utf-8-sig"),
-                   file_name="svodnaya_tablica.csv",
-                   mime="text/csv")
+    cols = st.columns(4)
+    for i, it in enumerate(group):
+        with cols[i % 4]:
+            # ▼ ИСПРАВЛЕНИЕ ОШИБКИ: вместо use_container_width используем width="stretch" ▼
+            st.image(thumb_url(it["file_id"]), width="stretch")
+            
+            st.markdown(
+                f"<div style='font-weight:700;font-size:14px;"
+                f"margin-top:-8px;'>{it['fio']}</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption(it["contest"])
+            if it["teacher"]:
+                st.caption(f"👩‍🏫 {it['teacher']}")
+            color = LEVEL_COLORS.get(it["level"], "#374151")
+            st.markdown(
+                f"<span style='background:{color}22;color:{color};"
+                f"font-size:11px;font-weight:700;padding:2px 8px;"
+                f"border-radius:20px;'>{it['level']}</span>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(f"[📂 Открыть грамоту]({it['url']})")
+            st.markdown("---")
