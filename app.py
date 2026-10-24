@@ -17,10 +17,13 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
 def get_sheet():
     creds = None
     try:
+        # Читаем словарь из секретов Streamlit Cloud
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     except (KeyError, FileNotFoundError):
+        # Локальный запуск (если секретов нет)
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+    
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEET_ID).worksheet(LIST_ACHIEVEMENTS)
 
@@ -182,8 +185,8 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
     cols = st.columns(4)
     for i, it in enumerate(group):
         with cols[i % 4]:
-            # ▼ ИСПРАВЛЕНИЕ ОШИБКИ: вместо use_container_width используем width="stretch" ▼
-            st.image(thumb_url(it["file_id"]), width="stretch")
+            # Возвращен совместимый параметр
+            st.image(thumb_url(it["file_id"]), use_container_width=True)
             
             st.markdown(
                 f"<div style='font-weight:700;font-size:14px;"
