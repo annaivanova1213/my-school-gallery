@@ -185,8 +185,8 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
     cols = st.columns(4)
     for i, it in enumerate(group):
         with cols[i % 4]:
-            # Возвращен совместимый параметр
-            st.image(thumb_url(it["file_id"]), use_container_width=True)
+            # Исправлено: используем фиксированную ширину, чтобы избежать ошибки TypeError
+            st.image(thumb_url(it["file_id"]), width=300)
             
             st.markdown(
                 f"<div style='font-weight:700;font-size:14px;"
