@@ -104,7 +104,7 @@ class SheetsClient:
         self.gc = gspread.authorize(self.creds)
         self.sh = self.gc.open_by_key(SHEET_ID)
         self.ws_students = self.sh.worksheet(LIST_STUDENTS)
-        self.ws_ach = self.sh.worksheet(LIST_ACHIEVEMENTS)
+        self.ws_ach      = self.sh.worksheet(LIST_ACHIEVEMENTS)
 
         self._students_cache = None
         self._teachers_cache = None
@@ -155,7 +155,7 @@ class SheetsClient:
             ).execute()
             file_id = created.get("id")
             url = created.get("webViewLink", "")
-
+            
             # Делаем файл публичным (чтобы галерея могла его показать)
             try:
                 service.permissions().create(
@@ -164,7 +164,7 @@ class SheetsClient:
                 ).execute()
             except Exception as e:
                 print(f"Не удалось открыть доступ к {fname}: {e}")
-
+                
             self._drive_url_cache[fname] = url
             return url
         except Exception as e:
@@ -180,72 +180,94 @@ class SheetsClient:
                 if len(row) < 4 or not row[0].strip():
                     continue
                 self._students_cache.append({
-                    "row": i,
-                    "surname": row[0].strip(),
-                    "name": row[1].strip(),
-                    "patronym": row[2].strip() if len(row) > 2 else "",
-                    "klass": row[3],
+                    "row":          i,
+                    "surname":      row[0].strip(),
+                    "name":         row[1].strip(),
+                    "patronym":     row[2].strip() if len(row) > 2 else "",
+                    "klass":        row[3],
                     "surname_norm": _normalize_word(row[0]),
-                    "name_low": row[1].strip().lower(),
+                    "name_low":     row[1].strip().lower(),
                 })
         return self._students_cache
 
     def find_student(self, fio: str):
         if not fio:
             return None
-        parts = [p for p in fio.strip().split() if p]
+        
+        # Очищаем строку от лишних символов и разбиваем на слова
+        parts = [p for p in re.split(r"[\s,.\-]+", fio.strip()) if p]
         if not parts:
             return None
 
-        surname_stem = _normalize_word(parts[0])
-        name_initial = parts[1][0].lower() if len(parts) >= 2 and parts[1] else None
-        name_full = parts[1].lower() if len(parts) >= 2 else None
+        surname_ocr = parts[0]
+        name_ocr = parts[1] if len(parts) > 1 else ""
+
+        # Приводим к нормальному виду
+        surname_stem = _normalize_word(surname_ocr)
+        name_low = name_ocr.lower()
 
         students = self._load_students()
 
-        for s in students:
-            if s["surname_norm"] != surname_stem:
-                continue
-            if name_initial and not s["name_low"].startswith(name_initial):
-                continue
-            return self._res_student(s, "точное")
+        # Функция для проверки схожести имен (насколько одно имя похоже на другое)
+        def is_name_match(name1, name2):
+            if not name1 or not name2:
+                return True # Если одного из имен нет, не блокируем поиск
+            # Сравниваем по 2-3 буквам
+            n1 = name1[:3]
+            n2 = name2[:3]
+            return _levenshtein(n1, n2) <= 1
 
+        # 1. Ищем точное совпадение (Фамилия + Имя)
+        for s in students:
+            if s["surname_norm"] == surname_stem:
+                if is_name_match(s["name_low"], name_low):
+                    return self._res_student(s, "точное (фамилия+имя)")
+                else:
+                    # Если фамилия совпала, но имя другое — запоминаем как кандидата
+                    pass
+
+        # 2. Нечеткий поиск (если в фамилии есть опечатки)
         best, best_dist = None, 999
         for s in students:
             d = _levenshtein(s["surname_norm"], surname_stem)
-            if d > 2:
+            if d > 3: # Увеличили допуск на опечатки в фамилии
                 continue
-            if name_initial and not s["name_low"].startswith(name_initial):
+            
+            if not is_name_match(s["name_low"], name_low):
                 continue
+
             if d < best_dist:
                 best_dist, best = d, s
+                
         if best:
             return self._res_student(best, f"нечёткое (dist={best_dist})")
 
-        if name_full and len(name_full) >= 3:
+        # 3. Поиск только по имени (если фамилия распознана с сильной ошибкой)
+        if name_low and len(name_low) >= 3:
             candidates = []
             for s in students:
-                if not s["name_low"].startswith(name_full[:3]):
+                if not is_name_match(s["name_low"], name_low):
                     continue
+                # Если первая буква фамилии совпадает
                 if s["surname_norm"] and surname_stem and \
                         s["surname_norm"][0] == surname_stem[0]:
                     candidates.append(s)
             if len(candidates) == 1:
                 return self._res_student(candidates[0], "по имени+букве фамилии")
 
-        if name_full and len(name_full) >= 4:
-            candidates = [s for s in students if s["name_low"] == name_full]
-            if len(candidates) == 1:
-                return self._res_student(candidates[0], "по имени (уникально)")
+        # 4. Если нашли по фамилии, но имя не совпало (на случай ошибки в имени)
+        for s in students:
+            if s["surname_norm"] == surname_stem:
+                 return self._res_student(s, "только по фамилии (имя не совпало)")
 
         return None
 
     @staticmethod
     def _res_student(s, source):
         return {
-            "row": s["row"],
-            "fio": f"{s['surname']} {s['name']} {s['patronym']}".strip(),
-            "klass": s["klass"],
+            "row":    s["row"],
+            "fio":    f"{s['surname']} {s['name']} {s['patronym']}".strip(),
+            "klass":  s["klass"],
             "source": source,
         }
 
@@ -333,8 +355,8 @@ class SheetsClient:
         for p in parts:
             p_clean = p.strip(".,;:")
             if re.fullmatch(r"[А-ЯЁ]\.?", p_clean) or \
-                    re.fullmatch(r"[А-ЯЁ]\.[А-ЯЁ]\.?", p_clean) or \
-                    re.fullmatch(r"[А-ЯЁ]{2}", p_clean):
+               re.fullmatch(r"[А-ЯЁ]\.[А-ЯЁ]\.?", p_clean) or \
+               re.fullmatch(r"[А-ЯЁ]{2}", p_clean):
                 initials.extend(re.findall(r"[А-ЯЁ]", p_clean.upper()))
             elif re.fullmatch(r"[А-ЯЁ][а-яё\-]+", p_clean) and surname is None:
                 surname = p_clean
@@ -360,15 +382,15 @@ class SheetsClient:
             diploma_cell = diploma_value
 
         self.ws_ach.append_row([
-            data.get("activity", "Конкурс"),  # A
-            data.get("contest", "Не указан"),  # B
-            data.get("nomination", ""),  # C
-            data.get("level", "Районный"),  # D
-            diploma_cell,  # E — формула
-            data.get("fio", "Не распознан"),  # F
-            data.get("teacher", ""),  # G
-            data.get("uploaded_by", ""),  # H
-            url,  # I — ЧИСТЫЙ URL
+            data.get("activity",    "Конкурс"),       # A
+            data.get("contest",     "Не указан"),     # B
+            data.get("nomination",  ""),              # C
+            data.get("level",       "Районный"),      # D
+            diploma_cell,                             # E — формула
+            data.get("fio",         "Не распознан"),  # F
+            data.get("teacher",     ""),              # G
+            data.get("uploaded_by", ""),              # H
+            url,                                      # I — ЧИСТЫЙ URL
         ], value_input_option="USER_ENTERED")
 
     def all_achievements(self):
@@ -379,33 +401,25 @@ class SheetsClient:
     # ═══════════════════════════════════════════════════════════
     @staticmethod
     def _normalize_klass(raw: str) -> str:
-        """'5 А', '5а', '5-А', '5' → '5-А' (или просто '5')."""
+        """'5 А', '5а', '5-А' → '5-А'. Всё непонятное → 'Без класса'."""
         if not raw:
             return "Без класса"
         s = str(raw).strip().upper().replace("Ё", "Е")
-
-        m_num = re.search(r'(\d{1,2})', s)
-        if not m_num:
-            return "Без класса"
-
-        num = m_num.group(1)
-
-        m_let = re.search(r'[А-ЯA-Z]', s)
-        if m_let:
-            let = m_let.group(0)
-            return f"{num}-{let}"
-
-        return num
+        m = re.match(r"^(\d{1,2})\s*[-–—]?\s*([А-ЯA-Z])$", s)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}"
+        return "Без класса"
 
     @staticmethod
     def _klass_sort_key(klass: str):
-        m = re.match(r"^(\d{1,2})(?:-([А-ЯA-Z]))?$", klass)
+        m = re.match(r"^(\d{1,2})-([А-ЯA-Z])$", klass)
         if m:
-            return (0, int(m.group(1)), m.group(2) or "")
+            return (0, int(m.group(1)), m.group(2))
         return (1, 999, klass)
 
     @staticmethod
     def _extract_drive_url_static(cell) -> str:
+        """Достаёт URL из ячейки: HYPERLINK, чистая ссылка или ID."""
         if not cell:
             return ""
         s = str(cell).strip()
@@ -421,6 +435,7 @@ class SheetsClient:
         return ""
 
     def _collect_gallery_items(self, rows=None):
+        """Готовит плоский список записей для галереи."""
         if rows is None:
             try:
                 rows = self.all_achievements()
@@ -447,6 +462,7 @@ class SheetsClient:
             nomination = (r.get("Номинация") or r.get("nomination") or "").strip()
             author = (r.get("Загрузил") or r.get("author") or "").strip()
 
+            # Ссылка: сначала чистый URL, потом HYPERLINK/ID из «Диплом»
             url = ""
             for key in ("Diploma URL", "diploma_url", "Ссылка", "URL"):
                 v = r.get(key)
@@ -472,11 +488,13 @@ class SheetsClient:
         return items
 
     def build_html_gallery(self, out_path=None, rows=None) -> str:
+        """Собирает HTML-галерею и возвращает путь к файлу (или '' при ошибке)."""
         items = self._collect_gallery_items(rows=rows)
         if not items:
             print("Галерея: нет записей с грамотами — файл не создан.")
             return ""
 
+        # группировка по классам
         by_klass = {}
         for it in items:
             by_klass.setdefault(it["klass"], []).append(it)
@@ -533,7 +551,7 @@ class SheetsClient:
           overflow:hidden; display:flex; flex-direction:column;
           transition: box-shadow .15s, transform .15s; cursor:pointer; }}
   .card:hover {{ box-shadow:0 6px 22px rgba(15,23,42,.10); transform:translateY(-2px); }}
-
+  
   /* Стили для картинок */
   .img-container {{
     width: 100%; aspect-ratio: 4/3; background: #F1F5F9;
@@ -546,7 +564,7 @@ class SheetsClient:
   .no-img {{
     font-size: 40px; color: #94A3B8;
   }}
-
+  
   .card-body {{ padding:10px 12px 12px; display:flex; flex-direction:column;
                gap:4px; flex:1; }}
   .fio {{ font-weight:700; font-size:13px; }}
@@ -560,7 +578,7 @@ class SheetsClient:
   .lvl-—                {{ background:#E5E7EB; color:#374151; }}
   .teacher {{ font-size:10.5px; color:#64748B; }}
   .empty {{ text-align:center; color:#64748B; padding:60px 20px; }}
-
+  
   #lightbox {{
     display: none; position: fixed; z-index: 9999; top:0; left:0; width:100%; height:100%;
     background: rgba(15, 23, 42, 0.9); justify-content: center; align-items: center;
@@ -614,9 +632,8 @@ class SheetsClient:
                 file_id = ""
                 m = re.search(r'/(?:file/d/|d/|id=)([a-zA-Z0-9_-]+)', it["url"])
                 if m: file_id = m.group(1)
-
+                
                 if file_id:
-                    # Прокси-сервис wsrv.nl надежно обходит блокировки Google
                     img_url = f"https://wsrv.nl/?url=drive.google.com/thumbnail?id={file_id}&sz=w800"
                     direct_link = f"https://drive.google.com/file/d/{file_id}/view"
                 else:
@@ -632,7 +649,7 @@ class SheetsClient:
                     f'       data-klass="{e(it["klass"])}">\n'
                     f'      <div class="img-container">\n'
                 )
-
+                
                 if img_url:
                     parts.append(
                         f'        <img loading="lazy" src="{e(img_url)}" alt="{e(it["fio"])}" '
