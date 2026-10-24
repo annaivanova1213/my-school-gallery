@@ -7,17 +7,25 @@ import gspread
 from google.oauth2.service_account import Credentials
 from config import CREDS_FILE, SHEET_ID, LIST_ACHIEVEMENTS
 
-# ▼▼▼ ИЗМЕНЕНО: Название вкладки браузера ▼▼▼
-st.set_page_config(page_title="MeritHub",
-                   page_icon="🎓", layout="wide")
+st.set_page_config(page_title="MeritHub", page_icon="🎓", layout="wide")
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
           "https://www.googleapis.com/auth/drive"]
 
 
+# ─── ГЛАВНОЕ ИЗМЕНЕНИЕ: читаем ключи из Secrets (облако) или файла (локально) ───
 @st.cache_resource(show_spinner=False)
 def get_sheet():
-    creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+    creds = None
+
+    # 1. Пытаемся взять данные из секретов Streamlit (для облака)
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    except (KeyError, FileNotFoundError):
+        # 2. Если секретов нет — берём локальный файл (для запуска на компьютере)
+        creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEET_ID).worksheet(LIST_ACHIEVEMENTS)
 
@@ -43,7 +51,6 @@ def extract_drive_url(cell_value) -> str:
     return ""
 
 
-# ▼▼▼ ИЗМЕНЕНО: Главный заголовок на странице ▼▼▼
 st.markdown("<h1 style='margin-bottom:0'>🎓 MeritHub</h1>",
             unsafe_allow_html=True)
 st.markdown("### 📋 Сводная таблица достижений")
@@ -53,6 +60,11 @@ try:
     rows = ws.get_all_records()
 except Exception as e:
     st.error(f"Не удалось подключиться к Google Sheets: {e}")
+    st.info(
+        "Проверьте: 1) Secrets настроены в Streamlit Cloud; "
+        "2) таблица расшарена на client_email из creds.json; "
+        "3) ID таблицы в config.py верный."
+    )
     st.stop()
 
 df = pd.DataFrame(rows)
