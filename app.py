@@ -21,7 +21,7 @@ def get_spreadsheet():
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     except (KeyError, FileNotFoundError):
         creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-    
+
     gc = gspread.authorize(creds)
     return gc.open_by_key(SHEET_ID)
 
@@ -78,7 +78,7 @@ try:
     sh = get_spreadsheet()
     ws_ach = sh.worksheet(LIST_ACHIEVEMENTS)
     rows = ws_ach.get_all_records()
-    
+
     # Загружаем справочник учителей для фото
     try:
         ws_teachers = sh.worksheet(LIST_TEACHERS)
@@ -87,7 +87,7 @@ try:
         for r in teacher_rows[1:]:
             if len(r) >= 3 and r[0].strip():
                 fio = r[0].strip()
-                url = r[2].strip() # Столбец C (индекс 2)
+                url = r[2].strip()  # Столбец C (индекс 2)
                 if url:
                     teacher_photos[fio] = url
     except Exception as e:
@@ -152,7 +152,8 @@ with c3:
 filtered = items
 if search:
     q = search.lower()
-    filtered = [it for it in filtered if q in it["fio"].lower() or q in it["contest"].lower() or q in it["teacher"].lower()]
+    filtered = [it for it in filtered if
+                q in it["fio"].lower() or q in it["contest"].lower() or q in it["teacher"].lower()]
 if lvl_filter != "Все":
     filtered = [it for it in filtered if it["level"] == lvl_filter]
 if kls_filter != "Все":
@@ -192,23 +193,23 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
         with cols[i % 4]:
             # Фото диплома
             st.image(thumb_url(it["file_id"]), width=300)
-            
+
             # ФИО ученика
             st.markdown(
                 f"<div style='font-weight:700;font-size:14px;margin-top:-8px;'>{it['fio']}</div>",
                 unsafe_allow_html=True,
             )
-            
+
             # Название конкурса
             st.caption(it["contest"])
-            
+
             # Учитель с аватаркой
             if it["teacher"]:
                 t_url = teacher_photos.get(it["teacher"])
                 if t_url:
                     t_fid = get_file_id(t_url)
                     if t_fid:
-                        t_avatar = thumb_url(t_fid, size=40) # Маленький размер для аватарки
+                        t_avatar = thumb_url(t_fid, size=40)  # Маленький размер для аватарки
                         # Вставляем круглое фото (object-fit: cover) и текст рядом
                         html_teacher = f"""
                         <div style='display:flex; align-items:center; margin-top:4px;'>
@@ -221,7 +222,7 @@ for klass in sorted(by_klass.keys(), key=klass_sort_key):
                         st.caption(f"👩‍🏫 {it['teacher']}")
                 else:
                     st.caption(f"👩‍🏫 {it['teacher']}")
-                
+
             # Уровень (бейдж)
             color = LEVEL_COLORS.get(it["level"], "#374151")
             st.markdown(
