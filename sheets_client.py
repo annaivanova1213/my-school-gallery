@@ -104,7 +104,7 @@ class SheetsClient:
         self.gc = gspread.authorize(self.creds)
         self.sh = self.gc.open_by_key(SHEET_ID)
         self.ws_students = self.sh.worksheet(LIST_STUDENTS)
-        self.ws_ach = self.sh.worksheet(LIST_ACHIEVEMENTS)
+        self.ws_ach      = self.sh.worksheet(LIST_ACHIEVEMENTS)
 
         self._students_cache = None
         self._teachers_cache = None
@@ -155,7 +155,7 @@ class SheetsClient:
             ).execute()
             file_id = created.get("id")
             url = created.get("webViewLink", "")
-
+            
             # Делаем файл публичным (чтобы галерея могла его показать)
             try:
                 service.permissions().create(
@@ -164,7 +164,7 @@ class SheetsClient:
                 ).execute()
             except Exception as e:
                 print(f"Не удалось открыть доступ к {fname}: {e}")
-
+                
             self._drive_url_cache[fname] = url
             return url
         except Exception as e:
@@ -180,20 +180,20 @@ class SheetsClient:
                 if len(row) < 4 or not row[0].strip():
                     continue
                 self._students_cache.append({
-                    "row": i,
-                    "surname": row[0].strip(),
-                    "name": row[1].strip(),
-                    "patronym": row[2].strip() if len(row) > 2 else "",
-                    "klass": row[3],
+                    "row":          i,
+                    "surname":      row[0].strip(),
+                    "name":         row[1].strip(),
+                    "patronym":     row[2].strip() if len(row) > 2 else "",
+                    "klass":        row[3],
                     "surname_norm": _normalize_word(row[0]),
-                    "name_low": row[1].strip().lower(),
+                    "name_low":     row[1].strip().lower(),
                 })
         return self._students_cache
 
     def find_student(self, fio: str):
         if not fio:
             return None
-
+        
         # 1. Берем ПЕРВОЕ слово как фамилию, ВТОРОЕ как имя
         parts = [p for p in re.split(r"[\s,.\-]+", fio.strip()) if p]
         if not parts:
@@ -221,7 +221,30 @@ class SheetsClient:
                 return self._res_student(best, f"нечёткая фамилия (dist={best_dist})")
             return None
 
-        # 3. Если нашли людей с такой фамилией:
+        # 3. Если нашли людей с такой фамилией, теперь ОЧЕНЬ МЯГКО проверяем имя
+        
+        # Функция для мягкого сравнения имен
+        def is_name_soft_match(name_table, name_ocr_val):
+            if not name_ocr_val:
+                return True # Если OCR не распознал имя, не блокируем поиск
+            
+            n1 = name_table.lower()
+            n2 = name_ocr_val.lower()
+            
+            # Если имена полностью совпадают
+            if n1 == n2:
+                return True
+                
+            # Если сокращенные формы (Даша / Дарья, Юля / Юлия)
+            # Берем первые 2 буквы и проверяем, что они совпадают
+            if n1[:2] == n2[:2]:
+                return True
+                
+            # Если OCR ошибся на 1-2 буквы в начале (например, "Дя" вместо "Да")
+            if _levenshtein(n1[:3], n2[:3]) <= 1:
+                return True
+                
+            return False
 
         # Если он один во всей школе — отдаем его, даже если имя распозналось неверно
         if len(candidates) == 1:
@@ -229,11 +252,11 @@ class SheetsClient:
 
         # Если их несколько (например, два Ивана), ищем по имени
         if name_low:
+            # Сначала ищем мягкое совпадение
             for s in candidates:
-                # Сравниваем первые 2 буквы имени
-                if s["name_low"][:2] == name_low[:2]:
-                    return self._res_student(s, "совпало имя")
-
+                if is_name_soft_match(s["name_low"], name_low):
+                    return self._res_student(s, "мягкое совпадение имени")
+            
             # Если не совпало, берем первого попавшегося (хоть какое-то имя лучше, чем пусто)
             return self._res_student(candidates[0], "совпала фамилия (имя не совпало)")
 
@@ -243,9 +266,9 @@ class SheetsClient:
     @staticmethod
     def _res_student(s, source):
         return {
-            "row": s["row"],
-            "fio": f"{s['surname']} {s['name']} {s['patronym']}".strip(),
-            "klass": s["klass"],
+            "row":    s["row"],
+            "fio":    f"{s['surname']} {s['name']} {s['patronym']}".strip(),
+            "klass":  s["klass"],
             "source": source,
         }
 
@@ -333,8 +356,8 @@ class SheetsClient:
         for p in parts:
             p_clean = p.strip(".,;:")
             if re.fullmatch(r"[А-ЯЁ]\.?", p_clean) or \
-                    re.fullmatch(r"[А-ЯЁ]\.[А-ЯЁ]\.?", p_clean) or \
-                    re.fullmatch(r"[А-ЯЁ]{2}", p_clean):
+               re.fullmatch(r"[А-ЯЁ]\.[А-ЯЁ]\.?", p_clean) or \
+               re.fullmatch(r"[А-ЯЁ]{2}", p_clean):
                 initials.extend(re.findall(r"[А-ЯЁ]", p_clean.upper()))
             elif re.fullmatch(r"[А-ЯЁ][а-яё\-]+", p_clean) and surname is None:
                 surname = p_clean
@@ -360,15 +383,15 @@ class SheetsClient:
             diploma_cell = diploma_value
 
         self.ws_ach.append_row([
-            data.get("activity", "Конкурс"),  # A
-            data.get("contest", "Не указан"),  # B
-            data.get("nomination", ""),  # C
-            data.get("level", "Районный"),  # D
-            diploma_cell,  # E — формула
-            data.get("fio", "Не распознан"),  # F
-            data.get("teacher", ""),  # G
-            data.get("uploaded_by", ""),  # H
-            url,  # I — ЧИСТЫЙ URL
+            data.get("activity",    "Конкурс"),       # A
+            data.get("contest",     "Не указан"),     # B
+            data.get("nomination",  ""),              # C
+            data.get("level",       "Районный"),      # D
+            diploma_cell,                             # E — формула
+            data.get("fio",         "Не распознан"),  # F
+            data.get("teacher",     ""),              # G
+            data.get("uploaded_by", ""),              # H
+            url,                                      # I — ЧИСТЫЙ URL
         ], value_input_option="USER_ENTERED")
 
     def all_achievements(self):
@@ -529,7 +552,7 @@ class SheetsClient:
           overflow:hidden; display:flex; flex-direction:column;
           transition: box-shadow .15s, transform .15s; cursor:pointer; }}
   .card:hover {{ box-shadow:0 6px 22px rgba(15,23,42,.10); transform:translateY(-2px); }}
-
+  
   /* Стили для картинок */
   .img-container {{
     width: 100%; aspect-ratio: 4/3; background: #F1F5F9;
@@ -542,7 +565,7 @@ class SheetsClient:
   .no-img {{
     font-size: 40px; color: #94A3B8;
   }}
-
+  
   .card-body {{ padding:10px 12px 12px; display:flex; flex-direction:column;
                gap:4px; flex:1; }}
   .fio {{ font-weight:700; font-size:13px; }}
@@ -556,7 +579,7 @@ class SheetsClient:
   .lvl-—                {{ background:#E5E7EB; color:#374151; }}
   .teacher {{ font-size:10.5px; color:#64748B; }}
   .empty {{ text-align:center; color:#64748B; padding:60px 20px; }}
-
+  
   #lightbox {{
     display: none; position: fixed; z-index: 9999; top:0; left:0; width:100%; height:100%;
     background: rgba(15, 23, 42, 0.9); justify-content: center; align-items: center;
@@ -610,7 +633,7 @@ class SheetsClient:
                 file_id = ""
                 m = re.search(r'/(?:file/d/|d/|id=)([a-zA-Z0-9_-]+)', it["url"])
                 if m: file_id = m.group(1)
-
+                
                 if file_id:
                     img_url = f"https://wsrv.nl/?url=drive.google.com/thumbnail?id={file_id}&sz=w800"
                     direct_link = f"https://drive.google.com/file/d/{file_id}/view"
@@ -627,7 +650,7 @@ class SheetsClient:
                     f'       data-klass="{e(it["klass"])}">\n'
                     f'      <div class="img-container">\n'
                 )
-
+                
                 if img_url:
                     parts.append(
                         f'        <img loading="lazy" src="{e(img_url)}" alt="{e(it["fio"])}" '
