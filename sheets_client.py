@@ -194,7 +194,7 @@ class SheetsClient:
         if not fio:
             return None
 
-        # Разбиваем OCR-строку на слова
+        # 1. Берем ПЕРВОЕ слово как фамилию, ВТОРОЕ как имя
         parts = [p for p in re.split(r"[\s,.\-]+", fio.strip()) if p]
         if not parts:
             return None
@@ -202,73 +202,43 @@ class SheetsClient:
         surname_ocr = parts[0]
         name_ocr = parts[1] if len(parts) > 1 else ""
 
-        # Приводим к нормальному виду
         surname_stem = _normalize_word(surname_ocr)
         name_low = name_ocr.lower()
 
         students = self._load_students()
 
-        # Функция для ОЧЕНЬ МЯГКОЙ проверки имен
-        def is_name_match(name_table, name_ocr_val):
-            if not name_ocr_val:
-                return True  # Если OCR не распознал имя, не блокируем поиск по фамилии
-            if not name_table:
-                return True  # Если в таблице пусто, пропускаем
+        # 2. Ищем людей с такой же фамилией
+        candidates = [s for s in students if s["surname_norm"] == surname_stem]
 
-            # Берем только первые 2 буквы (например, "Да" от "Дарья")
-            n1 = name_table[:2]
-            n2 = name_ocr_val[:2]
-            # Разрешаем 1 ошибку (например, если OCR прочитал "Дя")
-            return _levenshtein(n1, n2) <= 1
-
-        # 1. Ищем совпадение по фамилии + (мягко) по имени
-        exact_matches = []
-        for s in students:
-            if s["surname_norm"] == surname_stem:
-                if is_name_match(s["name_low"], name_low):
-                    exact_matches.append(s)
-
-        if len(exact_matches) == 1:
-            return self._res_student(exact_matches[0], "точное (фамилия+имя)")
-        elif len(exact_matches) > 1:
-            # Если нашли несколько (например, два Ивана), отдаем первого, но имя совпадает
-            return self._res_student(exact_matches[0], "несколько с таким именем")
-
-        # 2. Нечеткий поиск по фамилии (до 2 ошибок OCR)
-        best, best_dist = None, 999
-        for s in students:
-            d = _levenshtein(s["surname_norm"], surname_stem)
-            if d > 2:  # Допускаем до 2 ошибок в фамилии
-                continue
-
-            if not is_name_match(s["name_low"], name_low):
-                continue
-
-            if d < best_dist:
-                best_dist, best = d, s
-
-        if best:
-            return self._res_student(best, f"нечёткое (dist={best_dist})")
-
-        # 3. Если имя "убито" OCR (например, прочиталось "Юлия" вместо "Дарья")
-        # Но фамилия точная и в базе есть только 1 ученик с такой фамилией
-        if not name_low or len(name_low) < 2:
-            candidates = [s for s in students if s["surname_norm"] == surname_stem]
-            if len(candidates) == 1:
-                return self._res_student(candidates[0], "только фамилия (уникальная)")
-
-        # 4. Поиск по первой букве фамилии и первым 2 буквам имени (если фамилия сильно искажена)
-        if name_low and len(name_low) >= 2:
-            candidates = []
+        if not candidates:
+            # Если фамилия не совпала вообще, пробуем нечеткий поиск (опечатки OCR)
+            best, best_dist = None, 999
             for s in students:
-                if not is_name_match(s["name_low"], name_low):
-                    continue
-                if s["surname_norm"] and surname_stem and s["surname_norm"][0] == surname_stem[0]:
-                    candidates.append(s)
-            if len(candidates) == 1:
-                return self._res_student(candidates[0], "по имени+1-й букве фамилии")
+                d = _levenshtein(s["surname_norm"], surname_stem)
+                if d <= 2 and d < best_dist:
+                    best_dist, best = d, s
+            if best:
+                return self._res_student(best, f"нечёткая фамилия (dist={best_dist})")
+            return None
 
-        return None
+        # 3. Если нашли людей с такой фамилией:
+
+        # Если он один во всей школе — отдаем его, даже если имя распозналось неверно
+        if len(candidates) == 1:
+            return self._res_student(candidates[0], "единственный с такой фамилией")
+
+        # Если их несколько (например, два Ивана), ищем по имени
+        if name_low:
+            for s in candidates:
+                # Сравниваем первые 2 буквы имени
+                if s["name_low"][:2] == name_low[:2]:
+                    return self._res_student(s, "совпало имя")
+
+            # Если не совпало, берем первого попавшегося (хоть какое-то имя лучше, чем пусто)
+            return self._res_student(candidates[0], "совпала фамилия (имя не совпало)")
+
+        # Если OCR вообще не распознал имя, отдаем первого
+        return self._res_student(candidates[0], "только фамилия")
 
     @staticmethod
     def _res_student(s, source):
