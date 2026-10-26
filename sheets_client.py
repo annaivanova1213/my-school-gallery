@@ -156,7 +156,6 @@ class SheetsClient:
             file_id = created.get("id")
             url = created.get("webViewLink", "")
 
-            # Делаем файл публичным (чтобы галерея могла его показать)
             try:
                 service.permissions().create(
                     fileId=file_id,
@@ -194,7 +193,6 @@ class SheetsClient:
         if not fio:
             return None
 
-        # 1. Берем ПЕРВОЕ слово как фамилию, ВТОРОЕ как имя
         parts = [p for p in re.split(r"[\s,.\-]+", fio.strip()) if p]
         if not parts:
             return None
@@ -206,12 +204,9 @@ class SheetsClient:
         name_low = name_ocr.lower()
 
         students = self._load_students()
-
-        # 2. Ищем людей с такой же фамилией
         candidates = [s for s in students if s["surname_norm"] == surname_stem]
 
         if not candidates:
-            # Если фамилия не совпала вообще, пробуем нечеткий поиск (опечатки OCR)
             best, best_dist = None, 999
             for s in students:
                 d = _levenshtein(s["surname_norm"], surname_stem)
@@ -221,46 +216,28 @@ class SheetsClient:
                 return self._res_student(best, f"нечёткая фамилия (dist={best_dist})")
             return None
 
-        # 3. Если нашли людей с такой фамилией, теперь ОЧЕНЬ МЯГКО проверяем имя
-
-        # Функция для мягкого сравнения имен
         def is_name_soft_match(name_table, name_ocr_val):
             if not name_ocr_val:
-                return True  # Если OCR не распознал имя, не блокируем поиск
-
+                return True
             n1 = name_table.lower()
             n2 = name_ocr_val.lower()
-
-            # Если имена полностью совпадают
             if n1 == n2:
                 return True
-
-            # Если сокращенные формы (Даша / Дарья, Юля / Юлия)
-            # Берем первые 2 буквы и проверяем, что они совпадают
             if n1[:2] == n2[:2]:
                 return True
-
-            # Если OCR ошибся на 1-2 буквы в начале (например, "Дя" вместо "Да")
             if _levenshtein(n1[:3], n2[:3]) <= 1:
                 return True
-
             return False
 
-        # Если он один во всей школе — отдаем его, даже если имя распозналось неверно
         if len(candidates) == 1:
             return self._res_student(candidates[0], "единственный с такой фамилией")
 
-        # Если их несколько (например, два Ивана), ищем по имени
         if name_low:
-            # Сначала ищем мягкое совпадение
             for s in candidates:
                 if is_name_soft_match(s["name_low"], name_low):
                     return self._res_student(s, "мягкое совпадение имени")
-
-            # Если не совпало, берем первого попавшегося (хоть какое-то имя лучше, чем пусто)
             return self._res_student(candidates[0], "совпала фамилия (имя не совпало)")
 
-        # Если OCR вообще не распознал имя, отдаем первого
         return self._res_student(candidates[0], "только фамилия")
 
     @staticmethod
@@ -383,26 +360,183 @@ class SheetsClient:
             diploma_cell = diploma_value
 
         self.ws_ach.append_row([
-            data.get("activity", "Конкурс"),  # A
-            data.get("contest", "Не указан"),  # B
-            data.get("nomination", ""),  # C
-            data.get("level", "Районный"),  # D
-            diploma_cell,  # E — формула
-            data.get("fio", "Не распознан"),  # F
-            data.get("teacher", ""),  # G
-            data.get("uploaded_by", ""),  # H
-            url,  # I — ЧИСТЫЙ URL
+            data.get("activity", "Конкурс"),
+            data.get("contest", "Не указан"),
+            data.get("nomination", ""),
+            data.get("level", "Районный"),
+            diploma_cell,
+            data.get("fio", "Не распознан"),
+            data.get("teacher", ""),
+            data.get("uploaded_by", ""),
+            url,
+            data.get("publication_where", ""),
+            data.get("publication_output", ""),
         ], value_input_option="USER_ENTERED")
 
     def all_achievements(self):
         return self.ws_ach.get_all_records()
+
+    # ─────── Обновление существующей записи ───────
+    def update_achievement_by_filename(self, filename: str, updates: dict) -> bool:
+        if not filename:
+            return False
+
+        try:
+            headers = self.ws_ach.row_values(1)
+        except Exception as e:
+            print(f"Не удалось прочитать заголовки: {e}")
+            return False
+
+        col_map = {}
+        for idx, h in enumerate(headers, start=1):
+            h_norm = str(h).strip()
+            if h_norm in ("Диплом", "diploma", "filename"):
+                col_map.setdefault("diploma", idx)
+            elif h_norm in ("ФИО учащегося", "ФИО учащся", "fio", "Ученик"):
+                col_map.setdefault("fio", idx)
+            elif h_norm in ("ФИО учителя", "Учитель", "teacher"):
+                col_map.setdefault("teacher", idx)
+            elif h_norm in ("Номинация", "Класс", "klass"):
+                col_map.setdefault("klass", idx)
+
+        if "diploma" not in col_map:
+            print("Колонка «Диплом» не найдена в листе")
+            return False
+
+        try:
+            diploma_col = self.ws_ach.col_values(col_map["diploma"])
+        except Exception as e:
+            print(f"Не удалось прочитать колонку «Диплом»: {e}")
+            return False
+
+        base_name = os.path.basename(filename).strip().lower()
+        target_row = None
+        for idx, cell in enumerate(diploma_col):
+            if idx == 0:
+                continue
+            cell_str = str(cell).strip().lower()
+            if base_name and base_name in cell_str:
+                target_row = idx + 1
+                break
+            if cell_str == base_name:
+                target_row = idx + 1
+                break
+
+        if target_row is None:
+            print(f"Строка с файлом {filename!r} не найдена в Google Sheets")
+            return False
+
+        try:
+            if "fio" in col_map and "fio" in updates:
+                self.ws_ach.update_cell(target_row, col_map["fio"], updates["fio"])
+            if "teacher" in col_map and "teacher" in updates:
+                self.ws_ach.update_cell(target_row, col_map["teacher"], updates["teacher"])
+            if "klass" in col_map and "klass" in updates:
+                self.ws_ach.update_cell(target_row, col_map["klass"], updates["klass"])
+        except Exception as e:
+            print(f"Ошибка обновления ячеек: {e}")
+            return False
+
+        return True
+
+    def update_achievement_by_fio_and_contest(self, fio: str, contest: str, klass: str, updates: dict) -> bool:
+        if not fio or fio in ("Не распознан", "—"):
+            return False
+
+        try:
+            headers = self.ws_ach.row_values(1)
+            col_map = {}
+            for idx, h in enumerate(headers, start=1):
+                h_norm = str(h).strip().lower()
+                if h_norm in ("фио учащегося", "фио учащся", "fio", "ученик", "учащийся"):
+                    col_map["fio"] = idx
+                elif h_norm in ("фамилия",):
+                    col_map["surname"] = idx
+                elif h_norm in ("имя",):
+                    col_map["name"] = idx
+                elif h_norm in ("отчество",):
+                    col_map["patronym"] = idx
+                elif h_norm in ("фио учителя", "учитель", "teacher", "педагог"):
+                    col_map["teacher"] = idx
+                elif h_norm in ("номинация", "класс", "klass"):
+                    col_map["klass"] = idx
+                elif h_norm in ("название деятельности", "название", "деятельность", "contest", "конкурс"):
+                    col_map["contest"] = idx
+
+            all_data = self.ws_ach.get_all_values()
+            target_row = None
+
+            # Если ФИО было не распознано, ищем любую строку с "Не распознан" или пустую
+            if not fio or fio in ("Не распознан", "—", ""):
+                for idx in range(len(all_data) - 1, 0, -1):
+                    row = all_data[idx]
+                    r_fio = row[col_map.get("fio", 1) - 1].strip() if "fio" in col_map and len(row) >= col_map[
+                        "fio"] else ""
+                    if r_fio in ("Не распознан", "—", ""):
+                        target_row = idx + 1
+                        break
+            else:
+                parts = fio.split()
+                for idx in range(len(all_data) - 1, 0, -1):
+                    row = all_data[idx]
+                    r_fio = row[col_map.get("fio", 1) - 1].strip() if "fio" in col_map and len(row) >= col_map[
+                        "fio"] else ""
+                    if parts and parts[0].lower() in r_fio.lower():
+                        target_row = idx + 1
+                        break
+
+            # Запасной вариант: если точная строка не нашлась, берем последнюю строку с "Не распознан"
+            if target_row is None:
+                for idx in range(len(all_data) - 1, 0, -1):
+                    row = all_data[idx]
+                    r_fio = row[col_map.get("fio", 1) - 1].strip() if "fio" in col_map and len(row) >= col_map[
+                        "fio"] else ""
+                    if r_fio in ("Не распознан", "—", ""):
+                        target_row = idx + 1
+                        break
+
+            if target_row is None:
+                print(f"Строка для обновления не найдена в Google Sheets.")
+                return False
+
+            new_fio = updates.get("fio", "")
+            new_teacher = updates.get("teacher", "")
+            new_contest = updates.get("contest", "")
+
+            # Разбиваем новое ФИО
+            new_parts = new_fio.split()
+            n_surname = new_parts[0] if len(new_parts) > 0 else ""
+            n_name = new_parts[1] if len(new_parts) > 1 else ""
+            n_patronym = new_parts[2] if len(new_parts) > 2 else ""
+
+            # Обновляем те колонки, которые есть в таблице
+            if "fio" in col_map and new_fio:
+                self.ws_ach.update_cell(target_row, col_map["fio"], new_fio)
+            if "surname" in col_map and n_surname:
+                self.ws_ach.update_cell(target_row, col_map["surname"], n_surname)
+            if "name" in col_map and n_name:
+                self.ws_ach.update_cell(target_row, col_map["name"], n_name)
+            if "patronym" in col_map and n_patronym:
+                self.ws_ach.update_cell(target_row, col_map["patronym"], n_patronym)
+
+            # Обновляем учителя, класс и конкурс
+            if "teacher" in col_map and new_teacher:
+                self.ws_ach.update_cell(target_row, col_map["teacher"], new_teacher)
+            if "klass" in col_map and klass:
+                self.ws_ach.update_cell(target_row, col_map["klass"], klass)
+            if "contest" in col_map and new_contest and new_contest not in ("Не указан", "—", ""):
+                self.ws_ach.update_cell(target_row, col_map["contest"], new_contest)
+
+            return True
+        except Exception as e:
+            print(f"Ошибка при обновлении: {e}")
+            return False
 
     # ═══════════════════════════════════════════════════════════
     #                    HTML-ГАЛЕРЕЯ
     # ═══════════════════════════════════════════════════════════
     @staticmethod
     def _normalize_klass(raw: str) -> str:
-        """'5 А', '5а', '5-А' → '5-А'. Всё непонятное → 'Без класса'."""
         if not raw:
             return "Без класса"
         s = str(raw).strip().upper().replace("Ё", "Е")
@@ -420,7 +554,6 @@ class SheetsClient:
 
     @staticmethod
     def _extract_drive_url_static(cell) -> str:
-        """Достаёт URL из ячейки: HYPERLINK, чистая ссылка или ID."""
         if not cell:
             return ""
         s = str(cell).strip()
@@ -436,7 +569,6 @@ class SheetsClient:
         return ""
 
     def _collect_gallery_items(self, rows=None):
-        """Готовит плоский список записей для галереи."""
         if rows is None:
             try:
                 rows = self.all_achievements()
@@ -463,7 +595,6 @@ class SheetsClient:
             nomination = (r.get("Номинация") or r.get("nomination") or "").strip()
             author = (r.get("Загрузил") or r.get("author") or "").strip()
 
-            # Ссылка: сначала чистый URL, потом HYPERLINK/ID из «Диплом»
             url = ""
             for key in ("Diploma URL", "diploma_url", "Ссылка", "URL"):
                 v = r.get(key)
@@ -489,13 +620,11 @@ class SheetsClient:
         return items
 
     def build_html_gallery(self, out_path=None, rows=None) -> str:
-        """Собирает HTML-галерею и возвращает путь к файлу (или '' при ошибке)."""
         items = self._collect_gallery_items(rows=rows)
         if not items:
             print("Галерея: нет записей с грамотами — файл не создан.")
             return ""
 
-        # группировка по классам
         by_klass = {}
         for it in items:
             by_klass.setdefault(it["klass"], []).append(it)
@@ -553,7 +682,6 @@ class SheetsClient:
           transition: box-shadow .15s, transform .15s; cursor:pointer; }}
   .card:hover {{ box-shadow:0 6px 22px rgba(15,23,42,.10); transform:translateY(-2px); }}
 
-  /* Стили для картинок */
   .img-container {{
     width: 100%; aspect-ratio: 4/3; background: #F1F5F9;
     display: flex; align-items: center; justify-content: center; overflow: hidden;
